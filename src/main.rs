@@ -10,8 +10,6 @@ use tools::FeaturesMcpServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv().ok();
-
     let config = dataxlr8_mcp_core::Config::from_env("dataxlr8-features-mcp")
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -29,13 +27,17 @@ async fn main() -> Result<()> {
     // Run schema setup
     db::setup_schema(database.pool()).await?;
 
-    let server = FeaturesMcpServer::new(database);
+    let server = FeaturesMcpServer::new(database.clone());
 
     let transport = stdio();
     let service = server.serve(transport).await?;
 
     info!("Features MCP server connected via stdio");
     service.waiting().await?;
+
+    // Graceful shutdown
+    database.close().await;
+    info!("Features MCP server shut down");
 
     Ok(())
 }
