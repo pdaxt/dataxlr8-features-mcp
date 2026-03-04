@@ -202,6 +202,24 @@ fn build_tools() -> Vec<Tool> {
             icons: None,
             meta: None,
         },
+        Tool {
+            name: "remove_override".into(),
+            title: None,
+            description: Some("Remove a role or user override from a feature flag, reverting to the global setting.".into()),
+            input_schema: make_schema(
+                serde_json::json!({
+                    "flag_name": { "type": "string", "description": "Name of the feature flag" },
+                    "override_type": { "type": "string", "enum": ["role", "user"], "description": "Type of override to remove" },
+                    "target": { "type": "string", "description": "The role name or user/employee ID whose override to remove" }
+                }),
+                vec!["flag_name", "override_type", "target"],
+            ),
+            output_schema: None,
+            annotations: None,
+            execution: None,
+            icons: None,
+            meta: None,
+        },
     ]
 }
 
@@ -406,25 +424,33 @@ impl FeaturesMcpServer {
     }
 
     async fn handle_check_flags_bulk(&self, names: &[String], employee_id: Option<&str>, role: Option<&str>) -> CallToolResult {
+        // Batch-fetch all flags in one query (no N+1)
+        let flags: Vec<FeatureFlag> = match sqlx::query_as::<_, FeatureFlag>(
+            "SELECT * FROM features.flags WHERE name = ANY($1)",
+        )
+        .bind(names)
+        .fetch_all(self.db.pool())
+        .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                error!(error = %e, "Failed to batch-fetch flags");
+                // Fail-closed: all flags disabled on DB error
+                let mut results = serde_json::Map::new();
+                for name in names {
+                    results.insert(name.clone(), serde_json::json!({ "enabled": false, "reason": "database error" }));
+                }
+                return Self::json_result(&results);
+            }
+        };
+
+        // Index found flags by name for O(1) lookup
+        let flag_map: std::collections::HashMap<&str, &FeatureFlag> =
+            flags.iter().map(|f| (f.name.as_str(), f)).collect();
+
         let mut results = serde_json::Map::new();
         for name in names {
-            let flag: Option<FeatureFlag> = match sqlx::query_as(
-                "SELECT * FROM features.flags WHERE name = $1",
-            )
-            .bind(name)
-            .fetch_optional(self.db.pool())
-            .await
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    error!(flag_name = name, error = %e, "Failed to check flag in bulk");
-                    // On error, fail-closed
-                    results.insert(name.clone(), serde_json::json!({ "enabled": false, "reason": "database error" }));
-                    continue;
-                }
-            };
-
-            let (enabled, reason) = match flag {
+            let (enabled, reason) = match flag_map.get(name.as_str()) {
                 // FAIL-CLOSED: unknown flags default to disabled
                 None => (false, "unknown flag defaults to disabled"),
                 Some(f) => {
@@ -599,6 +625,69 @@ impl FeaturesMcpServer {
             Err(e) => Self::error_result(&format!("Failed to set override: {e}")),
         }
     }
+
+    async fn handle_remove_override(&self, args: &serde_json::Value) -> CallToolResult {
+        let flag_name = match Self::get_str(args, "flag_name") {
+            Some(n) => n,
+            None => return Self::error_result("Missing required parameter: flag_name"),
+        };
+        let override_type = match Self::get_str(args, "override_type") {
+            Some(t) => t,
+            None => return Self::error_result("Missing required parameter: override_type"),
+        };
+        let target = match Self::get_str(args, "target") {
+            Some(t) => t,
+            None => return Self::error_result("Missing required parameter: target"),
+        };
+
+        if !["role", "user"].contains(&override_type.as_str()) {
+            return Self::error_result("override_type must be one of: role, user");
+        }
+
+        // Look up the flag by name
+        let flag: Option<(String,)> = match sqlx::query_as(
+            "SELECT id FROM features.flags WHERE name = $1",
+        )
+        .bind(&flag_name)
+        .fetch_optional(self.db.pool())
+        .await
+        {
+            Ok(f) => f,
+            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+        };
+
+        let (flag_id,) = match flag {
+            Some(f) => f,
+            None => return Self::error_result(&format!("Flag '{flag_name}' not found")),
+        };
+
+        match sqlx::query(
+            "DELETE FROM features.flag_overrides WHERE flag_id = $1 AND override_type = $2 AND target = $3",
+        )
+        .bind(&flag_id)
+        .bind(&override_type)
+        .bind(&target)
+        .execute(self.db.pool())
+        .await
+        {
+            Ok(r) => {
+                if r.rows_affected() > 0 {
+                    info!(flag = flag_name, override_type = override_type, target = target, "Removed flag override");
+                    Self::json_result(&serde_json::json!({
+                        "removed": true,
+                        "flag_name": flag_name,
+                        "override_type": override_type,
+                        "target": target
+                    }))
+                } else {
+                    Self::error_result(&format!(
+                        "No {override_type} override found for target '{target}' on flag '{flag_name}'"
+                    ))
+                }
+            }
+            Err(e) => Self::error_result(&format!("Failed to remove override: {e}")),
+        }
+    }
 }
 
 // ============================================================================
@@ -680,6 +769,7 @@ impl ServerHandler for FeaturesMcpServer {
                     }
                 }
                 "set_override" => self.handle_set_override(&args).await,
+                "remove_override" => self.handle_remove_override(&args).await,
                 _ => Self::error_result(&format!("Unknown tool: {}", request.name)),
             };
 

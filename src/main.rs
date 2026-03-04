@@ -33,7 +33,17 @@ async fn main() -> Result<()> {
     let service = server.serve(transport).await?;
 
     info!("Features MCP server connected via stdio");
-    service.waiting().await?;
+
+    // Wait for either service completion or shutdown signal
+    tokio::select! {
+        result = service.waiting() => {
+            result?;
+            info!("MCP service ended");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received shutdown signal");
+        }
+    }
 
     // Graceful shutdown
     database.close().await;
