@@ -1,9 +1,9 @@
+use dataxlr8_mcp_core::mcp::{make_schema, empty_schema, json_result, error_result, get_str, get_bool, get_str_array};
 use dataxlr8_mcp_core::Database;
 use rmcp::model::*;
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::{error, info};
 
 // ============================================================================
@@ -42,27 +42,8 @@ pub struct FlagWithOverrides {
 }
 
 // ============================================================================
-// Tool schema helpers
+// Tool definitions
 // ============================================================================
-
-fn make_schema(properties: serde_json::Value, required: Vec<&str>) -> Arc<serde_json::Map<String, serde_json::Value>> {
-    let mut m = serde_json::Map::new();
-    m.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-    m.insert("properties".to_string(), properties);
-    if !required.is_empty() {
-        m.insert(
-            "required".to_string(),
-            serde_json::Value::Array(required.into_iter().map(|s| serde_json::Value::String(s.to_string())).collect()),
-        );
-    }
-    Arc::new(m)
-}
-
-fn empty_schema() -> Arc<serde_json::Map<String, serde_json::Value>> {
-    let mut m = serde_json::Map::new();
-    m.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-    Arc::new(m)
-}
 
 fn build_tools() -> Vec<Tool> {
     vec![
@@ -237,32 +218,6 @@ impl FeaturesMcpServer {
         Self { db }
     }
 
-    fn json_result<T: Serialize>(data: &T) -> CallToolResult {
-        match serde_json::to_string_pretty(data) {
-            Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("Serialization error: {e}"))]),
-        }
-    }
-
-    fn error_result(msg: &str) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(msg.to_string())])
-    }
-
-    fn get_str(args: &serde_json::Value, key: &str) -> Option<String> {
-        args.get(key).and_then(|v| v.as_str()).map(String::from)
-    }
-
-    fn get_bool(args: &serde_json::Value, key: &str) -> Option<bool> {
-        args.get(key).and_then(|v| v.as_bool())
-    }
-
-    fn get_str_array(args: &serde_json::Value, key: &str) -> Vec<String> {
-        args.get(key)
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default()
-    }
-
     /// Resolve the effective enabled state for a flag, considering overrides.
     /// Priority: user override > role override > global flag setting.
     /// Returns (enabled, reason).
@@ -323,11 +278,11 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(f) => f,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         if flags.is_empty() {
-            return Self::json_result(&Vec::<FlagWithOverrides>::new());
+            return json_result(&Vec::<FlagWithOverrides>::new());
         }
 
         // Fetch ALL overrides in one query instead of N+1
@@ -361,7 +316,7 @@ impl FeaturesMcpServer {
             })
             .collect();
 
-        Self::json_result(&results)
+        json_result(&results)
     }
 
     async fn handle_get_flag(&self, name: &str) -> CallToolResult {
@@ -373,7 +328,7 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(f) => f,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         match flag {
@@ -392,9 +347,9 @@ impl FeaturesMcpServer {
                     }
                 };
 
-                Self::json_result(&FlagWithOverrides { flag, overrides })
+                json_result(&FlagWithOverrides { flag, overrides })
             }
-            None => Self::error_result(&format!("Flag '{name}' not found")),
+            None => error_result(&format!("Flag '{name}' not found")),
         }
     }
 
@@ -407,20 +362,20 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(f) => f,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         let flag = match flag {
             Some(f) => f,
             // FAIL-CLOSED: unknown flags default to disabled
-            None => return Self::json_result(&serde_json::json!({
+            None => return json_result(&serde_json::json!({
                 "enabled": false,
                 "reason": "unknown flag defaults to disabled"
             })),
         };
 
         let (enabled, reason) = self.resolve_flag_state(&flag.id, flag.enabled, employee_id, role).await;
-        Self::json_result(&serde_json::json!({ "enabled": enabled, "reason": reason }))
+        json_result(&serde_json::json!({ "enabled": enabled, "reason": reason }))
     }
 
     async fn handle_check_flags_bulk(&self, names: &[String], employee_id: Option<&str>, role: Option<&str>) -> CallToolResult {
@@ -440,7 +395,7 @@ impl FeaturesMcpServer {
                 for name in names {
                     results.insert(name.clone(), serde_json::json!({ "enabled": false, "reason": "database error" }));
                 }
-                return Self::json_result(&results);
+                return json_result(&results);
             }
         };
 
@@ -459,22 +414,22 @@ impl FeaturesMcpServer {
             };
             results.insert(name.clone(), serde_json::json!({ "enabled": enabled, "reason": reason }));
         }
-        Self::json_result(&results)
+        json_result(&results)
     }
 
     async fn handle_create_flag(&self, args: &serde_json::Value) -> CallToolResult {
-        let name = match Self::get_str(args, "name") {
+        let name = match get_str(args, "name") {
             Some(n) => n,
-            None => return Self::error_result("Missing required parameter: name"),
+            None => return error_result("Missing required parameter: name"),
         };
-        let flag_type = Self::get_str(args, "flag_type").unwrap_or_else(|| "global".into());
-        let description = Self::get_str(args, "description").unwrap_or_default();
-        let enabled = Self::get_bool(args, "enabled").unwrap_or(true);
-        let page_path = Self::get_str(args, "page_path").unwrap_or_default();
+        let flag_type = get_str(args, "flag_type").unwrap_or_else(|| "global".into());
+        let description = get_str(args, "description").unwrap_or_default();
+        let enabled = get_bool(args, "enabled").unwrap_or(true);
+        let page_path = get_str(args, "page_path").unwrap_or_default();
 
         // Validate flag_type
         if !["global", "page", "feature"].contains(&flag_type.as_str()) {
-            return Self::error_result("flag_type must be one of: global, page, feature");
+            return error_result("flag_type must be one of: global, page, feature");
         }
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -494,16 +449,16 @@ impl FeaturesMcpServer {
         {
             Ok(flag) => {
                 info!(name = name, "Created feature flag");
-                Self::json_result(&flag)
+                json_result(&flag)
             }
-            Err(e) => Self::error_result(&format!("Failed to create flag: {e}")),
+            Err(e) => error_result(&format!("Failed to create flag: {e}")),
         }
     }
 
     async fn handle_update_flag(&self, args: &serde_json::Value) -> CallToolResult {
-        let name = match Self::get_str(args, "name") {
+        let name = match get_str(args, "name") {
             Some(n) => n,
-            None => return Self::error_result("Missing required parameter: name"),
+            None => return error_result("Missing required parameter: name"),
         };
 
         let existing: Option<FeatureFlag> = match sqlx::query_as(
@@ -514,16 +469,16 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(f) => f,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         let existing = match existing {
             Some(f) => f,
-            None => return Self::error_result(&format!("Flag '{name}' not found")),
+            None => return error_result(&format!("Flag '{name}' not found")),
         };
 
-        let enabled = Self::get_bool(args, "enabled").unwrap_or(existing.enabled);
-        let description = Self::get_str(args, "description").unwrap_or(existing.description);
+        let enabled = get_bool(args, "enabled").unwrap_or(existing.enabled);
+        let description = get_str(args, "description").unwrap_or(existing.description);
 
         // Use RETURNING to get the updated row in one query (no read-back unwrap)
         match sqlx::query_as::<_, FeatureFlag>(
@@ -537,9 +492,9 @@ impl FeaturesMcpServer {
         {
             Ok(flag) => {
                 info!(name = name, "Updated feature flag");
-                Self::json_result(&flag)
+                json_result(&flag)
             }
-            Err(e) => Self::error_result(&format!("Failed to update flag: {e}")),
+            Err(e) => error_result(&format!("Failed to update flag: {e}")),
         }
     }
 
@@ -552,36 +507,36 @@ impl FeaturesMcpServer {
             Ok(r) => {
                 if r.rows_affected() > 0 {
                     info!(name = name, "Deleted feature flag");
-                    Self::json_result(&serde_json::json!({ "deleted": true, "name": name }))
+                    json_result(&serde_json::json!({ "deleted": true, "name": name }))
                 } else {
-                    Self::error_result(&format!("Flag '{name}' not found"))
+                    error_result(&format!("Flag '{name}' not found"))
                 }
             }
-            Err(e) => Self::error_result(&format!("Failed to delete flag: {e}")),
+            Err(e) => error_result(&format!("Failed to delete flag: {e}")),
         }
     }
 
     async fn handle_set_override(&self, args: &serde_json::Value) -> CallToolResult {
-        let flag_name = match Self::get_str(args, "flag_name") {
+        let flag_name = match get_str(args, "flag_name") {
             Some(n) => n,
-            None => return Self::error_result("Missing required parameter: flag_name"),
+            None => return error_result("Missing required parameter: flag_name"),
         };
-        let override_type = match Self::get_str(args, "override_type") {
+        let override_type = match get_str(args, "override_type") {
             Some(t) => t,
-            None => return Self::error_result("Missing required parameter: override_type"),
+            None => return error_result("Missing required parameter: override_type"),
         };
-        let target = match Self::get_str(args, "target") {
+        let target = match get_str(args, "target") {
             Some(t) => t,
-            None => return Self::error_result("Missing required parameter: target"),
+            None => return error_result("Missing required parameter: target"),
         };
-        let enabled = match Self::get_bool(args, "enabled") {
+        let enabled = match get_bool(args, "enabled") {
             Some(e) => e,
-            None => return Self::error_result("Missing required parameter: enabled"),
+            None => return error_result("Missing required parameter: enabled"),
         };
 
         // Validate override_type
         if !["role", "user"].contains(&override_type.as_str()) {
-            return Self::error_result("override_type must be one of: role, user");
+            return error_result("override_type must be one of: role, user");
         }
 
         let flag: Option<(String,)> = match sqlx::query_as(
@@ -592,12 +547,12 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(f) => f,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         let (flag_id,) = match flag {
             Some(f) => f,
-            None => return Self::error_result(&format!("Flag '{flag_name}' not found")),
+            None => return error_result(&format!("Flag '{flag_name}' not found")),
         };
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -620,28 +575,28 @@ impl FeaturesMcpServer {
         {
             Ok(ov) => {
                 info!(flag = flag_name, override_type = override_type, target = target, "Set flag override");
-                Self::json_result(&ov)
+                json_result(&ov)
             }
-            Err(e) => Self::error_result(&format!("Failed to set override: {e}")),
+            Err(e) => error_result(&format!("Failed to set override: {e}")),
         }
     }
 
     async fn handle_remove_override(&self, args: &serde_json::Value) -> CallToolResult {
-        let flag_name = match Self::get_str(args, "flag_name") {
+        let flag_name = match get_str(args, "flag_name") {
             Some(n) => n,
-            None => return Self::error_result("Missing required parameter: flag_name"),
+            None => return error_result("Missing required parameter: flag_name"),
         };
-        let override_type = match Self::get_str(args, "override_type") {
+        let override_type = match get_str(args, "override_type") {
             Some(t) => t,
-            None => return Self::error_result("Missing required parameter: override_type"),
+            None => return error_result("Missing required parameter: override_type"),
         };
-        let target = match Self::get_str(args, "target") {
+        let target = match get_str(args, "target") {
             Some(t) => t,
-            None => return Self::error_result("Missing required parameter: target"),
+            None => return error_result("Missing required parameter: target"),
         };
 
         if !["role", "user"].contains(&override_type.as_str()) {
-            return Self::error_result("override_type must be one of: role, user");
+            return error_result("override_type must be one of: role, user");
         }
 
         // Look up the flag by name
@@ -653,12 +608,12 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(f) => f,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         let (flag_id,) = match flag {
             Some(f) => f,
-            None => return Self::error_result(&format!("Flag '{flag_name}' not found")),
+            None => return error_result(&format!("Flag '{flag_name}' not found")),
         };
 
         match sqlx::query(
@@ -673,19 +628,19 @@ impl FeaturesMcpServer {
             Ok(r) => {
                 if r.rows_affected() > 0 {
                     info!(flag = flag_name, override_type = override_type, target = target, "Removed flag override");
-                    Self::json_result(&serde_json::json!({
+                    json_result(&serde_json::json!({
                         "removed": true,
                         "flag_name": flag_name,
                         "override_type": override_type,
                         "target": target
                     }))
                 } else {
-                    Self::error_result(&format!(
+                    error_result(&format!(
                         "No {override_type} override found for target '{target}' on flag '{flag_name}'"
                     ))
                 }
             }
-            Err(e) => Self::error_result(&format!("Failed to remove override: {e}")),
+            Err(e) => error_result(&format!("Failed to remove override: {e}")),
         }
     }
 }
@@ -735,42 +690,42 @@ impl ServerHandler for FeaturesMcpServer {
             let result = match name_str {
                 "get_all_flags" => self.handle_get_all_flags().await,
                 "get_flag" => {
-                    match Self::get_str(&args, "name") {
+                    match get_str(&args, "name") {
                         Some(name) => self.handle_get_flag(&name).await,
-                        None => Self::error_result("Missing required parameter: name"),
+                        None => error_result("Missing required parameter: name"),
                     }
                 }
                 "check_flag" => {
-                    match Self::get_str(&args, "name") {
+                    match get_str(&args, "name") {
                         Some(name) => {
-                            let eid = Self::get_str(&args, "employee_id");
-                            let role = Self::get_str(&args, "role");
+                            let eid = get_str(&args, "employee_id");
+                            let role = get_str(&args, "role");
                             self.handle_check_flag(&name, eid.as_deref(), role.as_deref()).await
                         }
-                        None => Self::error_result("Missing required parameter: name"),
+                        None => error_result("Missing required parameter: name"),
                     }
                 }
                 "check_flags_bulk" => {
-                    let names = Self::get_str_array(&args, "names");
+                    let names = get_str_array(&args, "names");
                     if names.is_empty() {
-                        Self::error_result("Missing required parameter: names (must be a non-empty array)")
+                        error_result("Missing required parameter: names (must be a non-empty array)")
                     } else {
-                        let eid = Self::get_str(&args, "employee_id");
-                        let role = Self::get_str(&args, "role");
+                        let eid = get_str(&args, "employee_id");
+                        let role = get_str(&args, "role");
                         self.handle_check_flags_bulk(&names, eid.as_deref(), role.as_deref()).await
                     }
                 }
                 "create_flag" => self.handle_create_flag(&args).await,
                 "update_flag" => self.handle_update_flag(&args).await,
                 "delete_flag" => {
-                    match Self::get_str(&args, "name") {
+                    match get_str(&args, "name") {
                         Some(name) => self.handle_delete_flag(&name).await,
-                        None => Self::error_result("Missing required parameter: name"),
+                        None => error_result("Missing required parameter: name"),
                     }
                 }
                 "set_override" => self.handle_set_override(&args).await,
                 "remove_override" => self.handle_remove_override(&args).await,
-                _ => Self::error_result(&format!("Unknown tool: {}", request.name)),
+                _ => error_result(&format!("Unknown tool: {}", request.name)),
             };
 
             Ok(result)
