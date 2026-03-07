@@ -7,6 +7,30 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+const MAX_NAME_LEN: usize = 500;
+const MAX_CONTENT_LEN: usize = 100_000;
+
+/// Validate a required string parameter: trim, reject empty/whitespace, enforce length limit.
+fn validate_required_str(raw: Option<String>, param: &str, max_len: usize) -> Result<String, CallToolResult> {
+    match raw {
+        None => Err(error_result(&format!("Missing required parameter: {param}"))),
+        Some(s) => {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() {
+                Err(error_result(&format!("Parameter '{param}' must not be empty")))
+            } else if trimmed.len() > max_len {
+                Err(error_result(&format!("Parameter '{param}' exceeds {max_len} chars")))
+            } else {
+                Ok(trimmed)
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Data types
 // ============================================================================
 
@@ -418,12 +442,15 @@ impl FeaturesMcpServer {
     }
 
     async fn handle_create_flag(&self, args: &serde_json::Value) -> CallToolResult {
-        let name = match get_str(args, "name") {
-            Some(n) => n,
-            None => return error_result("Missing required parameter: name"),
+        let name = match validate_required_str(get_str(args, "name"), "name", MAX_NAME_LEN) {
+            Ok(n) => n,
+            Err(e) => return e,
         };
         let flag_type = get_str(args, "flag_type").unwrap_or_else(|| "global".into());
         let description = get_str(args, "description").unwrap_or_default();
+        if description.len() > MAX_CONTENT_LEN {
+            return error_result(&format!("Parameter 'description' exceeds {} chars", MAX_CONTENT_LEN));
+        }
         let enabled = get_bool(args, "enabled").unwrap_or(true);
         let page_path = get_str(args, "page_path").unwrap_or_default();
 
@@ -448,7 +475,7 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(flag) => {
-                info!(name = name, "Created feature flag");
+                info!(name = %name, "Created feature flag");
                 json_result(&flag)
             }
             Err(e) => error_result(&format!("Failed to create flag: {e}")),
@@ -456,9 +483,9 @@ impl FeaturesMcpServer {
     }
 
     async fn handle_update_flag(&self, args: &serde_json::Value) -> CallToolResult {
-        let name = match get_str(args, "name") {
-            Some(n) => n,
-            None => return error_result("Missing required parameter: name"),
+        let name = match validate_required_str(get_str(args, "name"), "name", MAX_NAME_LEN) {
+            Ok(n) => n,
+            Err(e) => return e,
         };
 
         let existing: Option<FeatureFlag> = match sqlx::query_as(
@@ -491,7 +518,7 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(flag) => {
-                info!(name = name, "Updated feature flag");
+                info!(name = %name, "Updated feature flag");
                 json_result(&flag)
             }
             Err(e) => error_result(&format!("Failed to update flag: {e}")),
@@ -517,17 +544,17 @@ impl FeaturesMcpServer {
     }
 
     async fn handle_set_override(&self, args: &serde_json::Value) -> CallToolResult {
-        let flag_name = match get_str(args, "flag_name") {
-            Some(n) => n,
-            None => return error_result("Missing required parameter: flag_name"),
+        let flag_name = match validate_required_str(get_str(args, "flag_name"), "flag_name", MAX_NAME_LEN) {
+            Ok(n) => n,
+            Err(e) => return e,
         };
-        let override_type = match get_str(args, "override_type") {
-            Some(t) => t,
-            None => return error_result("Missing required parameter: override_type"),
+        let override_type = match validate_required_str(get_str(args, "override_type"), "override_type", MAX_NAME_LEN) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
-        let target = match get_str(args, "target") {
-            Some(t) => t,
-            None => return error_result("Missing required parameter: target"),
+        let target = match validate_required_str(get_str(args, "target"), "target", MAX_NAME_LEN) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
         let enabled = match get_bool(args, "enabled") {
             Some(e) => e,
@@ -574,7 +601,7 @@ impl FeaturesMcpServer {
         .await
         {
             Ok(ov) => {
-                info!(flag = flag_name, override_type = override_type, target = target, "Set flag override");
+                info!(flag = %flag_name, override_type = %override_type, target = %target, "Set flag override");
                 json_result(&ov)
             }
             Err(e) => error_result(&format!("Failed to set override: {e}")),
@@ -582,17 +609,17 @@ impl FeaturesMcpServer {
     }
 
     async fn handle_remove_override(&self, args: &serde_json::Value) -> CallToolResult {
-        let flag_name = match get_str(args, "flag_name") {
-            Some(n) => n,
-            None => return error_result("Missing required parameter: flag_name"),
+        let flag_name = match validate_required_str(get_str(args, "flag_name"), "flag_name", MAX_NAME_LEN) {
+            Ok(n) => n,
+            Err(e) => return e,
         };
-        let override_type = match get_str(args, "override_type") {
-            Some(t) => t,
-            None => return error_result("Missing required parameter: override_type"),
+        let override_type = match validate_required_str(get_str(args, "override_type"), "override_type", MAX_NAME_LEN) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
-        let target = match get_str(args, "target") {
-            Some(t) => t,
-            None => return error_result("Missing required parameter: target"),
+        let target = match validate_required_str(get_str(args, "target"), "target", MAX_NAME_LEN) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
 
         if !["role", "user"].contains(&override_type.as_str()) {
@@ -627,7 +654,7 @@ impl FeaturesMcpServer {
         {
             Ok(r) => {
                 if r.rows_affected() > 0 {
-                    info!(flag = flag_name, override_type = override_type, target = target, "Removed flag override");
+                    info!(flag = %flag_name, override_type = %override_type, target = %target, "Removed flag override");
                     json_result(&serde_json::json!({
                         "removed": true,
                         "flag_name": flag_name,
@@ -690,19 +717,19 @@ impl ServerHandler for FeaturesMcpServer {
             let result = match name_str {
                 "get_all_flags" => self.handle_get_all_flags().await,
                 "get_flag" => {
-                    match get_str(&args, "name") {
-                        Some(name) => self.handle_get_flag(&name).await,
-                        None => error_result("Missing required parameter: name"),
+                    match validate_required_str(get_str(&args, "name"), "name", MAX_NAME_LEN) {
+                        Ok(name) => self.handle_get_flag(&name).await,
+                        Err(e) => e,
                     }
                 }
                 "check_flag" => {
-                    match get_str(&args, "name") {
-                        Some(name) => {
+                    match validate_required_str(get_str(&args, "name"), "name", MAX_NAME_LEN) {
+                        Ok(name) => {
                             let eid = get_str(&args, "employee_id");
                             let role = get_str(&args, "role");
                             self.handle_check_flag(&name, eid.as_deref(), role.as_deref()).await
                         }
-                        None => error_result("Missing required parameter: name"),
+                        Err(e) => e,
                     }
                 }
                 "check_flags_bulk" => {
@@ -718,9 +745,9 @@ impl ServerHandler for FeaturesMcpServer {
                 "create_flag" => self.handle_create_flag(&args).await,
                 "update_flag" => self.handle_update_flag(&args).await,
                 "delete_flag" => {
-                    match get_str(&args, "name") {
-                        Some(name) => self.handle_delete_flag(&name).await,
-                        None => error_result("Missing required parameter: name"),
+                    match validate_required_str(get_str(&args, "name"), "name", MAX_NAME_LEN) {
+                        Ok(name) => self.handle_delete_flag(&name).await,
+                        Err(e) => e,
                     }
                 }
                 "set_override" => self.handle_set_override(&args).await,
