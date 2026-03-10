@@ -5,6 +5,10 @@ edition = "2024"
 description = "Feature flags MCP server for DataXLR8 platform"
 repository = "https://github.com/pdaxt/dataxlr8-features-mcp"
 
+
+[lib]
+name = "dataxlr8_features_mcp"
+path = "src/lib.rs"
 [dependencies]
 # MCP SDK
 rmcp = { version = "0.17", features = ["server", "transport-io"] }
